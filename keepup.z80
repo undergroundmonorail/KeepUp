@@ -1,0 +1,896 @@
+;****************************************************************************************************************************************************
+;*	KeepUp
+;*
+;****************************************************************************************************************************************************
+;*
+;*
+;****************************************************************************************************************************************************
+
+;****************************************************************************************************************************************************
+;*	Includes
+;****************************************************************************************************************************************************
+	; system includes
+	INCLUDE	"Hardware.inc"
+	
+	INCLUDE	"memory.asm"
+	INCLUDE	"sprite.inc"
+	
+	INCLUDE	"KeepUpTiles.z80"
+	INCLUDE	"TitlescreenMap.z80"
+	INCLUDE	"GameMap.z80"
+	
+	INCLUDE	"music.z80"
+;****************************************************************************************************************************************************
+;*	user data (constants)
+;****************************************************************************************************************************************************
+
+
+;****************************************************************************************************************************************************
+;*	equates
+;****************************************************************************************************************************************************
+	LoByteVar	CurMap
+	
+	SpriteAttr	Ball
+	SpriteAttr	PaddleL
+	SpriteAttr	PaddleM
+	SpriteAttr	PaddleR
+	
+	LoByteVar	BallXVector
+	LoByteVar	BallYVector
+	
+	LoByteVar	CurScoreHigh
+	LoByteVar	CurScoreLow
+	LoByteVar	HighScoreHigh
+	LoByteVar	HighScoreLow
+
+;****************************************************************************************************************************************************
+;*	cartridge header
+;****************************************************************************************************************************************************
+
+	SECTION	"Org $00",HOME[$00]
+RST_00:	
+	jp	$100
+
+	SECTION	"Org $08",HOME[$08]
+RST_08:	
+	jp	$100
+
+	SECTION	"Org $10",HOME[$10]
+RST_10:
+	jp	$100
+
+	SECTION	"Org $18",HOME[$18]
+RST_18:
+	jp	$100
+
+	SECTION	"Org $20",HOME[$20]
+RST_20:
+	jp	$100
+
+	SECTION	"Org $28",HOME[$28]
+RST_28:
+	jp	$100
+
+	SECTION	"Org $30",HOME[$30]
+RST_30:
+	jp	$100
+
+	SECTION	"Org $38",HOME[$38]
+RST_38:
+	jp	$100
+
+	SECTION	"V-Blank IRQ Vector",HOME[$40]
+VBL_VECT:
+	call VBLANK_CODE
+	reti
+	
+	SECTION	"LCD IRQ Vector",HOME[$48]
+LCD_VECT:
+	reti
+
+	SECTION	"Timer IRQ Vector",HOME[$50]
+TIMER_VECT:
+	reti
+
+	SECTION	"Serial IRQ Vector",HOME[$58]
+SERIAL_VECT:
+	reti
+
+	SECTION	"Joypad IRQ Vector",HOME[$60]
+JOYPAD_VECT:
+	reti
+	
+	SECTION	"Start",HOME[$100]
+	nop
+	jp	Start
+
+	; $0104-$0133 (Nintendo logo - do _not_ modify the logo data here or the GB will not run the program)
+	DB	$CE,$ED,$66,$66,$CC,$0D,$00,$0B,$03,$73,$00,$83,$00,$0C,$00,$0D
+	DB	$00,$08,$11,$1F,$88,$89,$00,$0E,$DC,$CC,$6E,$E6,$DD,$DD,$D9,$99
+	DB	$BB,$BB,$67,$63,$6E,$0E,$EC,$CC,$DD,$DC,$99,$9F,$BB,$B9,$33,$3E
+
+	; $0134-$013E (Game title - up to 11 upper case ASCII characters; pad with $00)
+	DB	"KEEPUP",0,0,0,0,0
+		;0123456789A
+
+	; $013F-$0142 (Product code - 4 ASCII characters, assigned by Nintendo, just leave blank)
+	DB	"    "
+		;0123
+
+	; $0143 (Color GameBoy compatibility code)
+	DB	$00	; $00 - DMG 
+			; $80 - DMG/GBC
+			; $C0 - GBC Only cartridge
+
+	; $0144 (High-nibble of license code - normally $00 if $014B != $33)
+	DB	$00
+
+	; $0145 (Low-nibble of license code - normally $00 if $014B != $33)
+	DB	$00
+
+	; $0146 (GameBoy/Super GameBoy indicator)
+	DB	$00	; $00 - GameBoy
+
+	; $0147 (Cartridge type - all Color GameBoy cartridges are at least $19)
+	DB	$09	; ROM+RAM+BATTERY
+
+	; $0148 (ROM size)
+	DB	$01	; $01 - 512Kbit = 64Kbyte = 4 banks
+
+	; $0149 (RAM size)
+	DB	$01	; $01 - 64KByte
+
+	; $014A (Destination code)
+	DB	$00	; $01 - All others
+			; $00 - Japan
+
+	; $014B (Licensee code - this _must_ be $33)
+	DB	$33	; $33 - Check $0144/$0145 for Licensee code.
+
+	; $014C (Mask ROM version - handled by RGBFIX)
+	DB	$00
+
+	; $014D (Complement check - handled by RGBFIX)
+	DB	$00
+
+	; $014E-$014F (Cartridge checksum - handled by RGBFIX)
+	DW	$00
+
+
+;****************************************************************************************************************************************************
+;*	Program Start
+;****************************************************************************************************************************************************
+
+	SECTION "Program Start",HOME[$0150]
+Start::
+	; interrupt/stack pointer boilerplate
+	di
+	ld	a,$01
+	ldh	[$FF],a
+	ld	sp,$FFFE
+	
+	; clear pending interrupts
+	xor	a
+	ldh	[$0F],a
+	
+	; wait for v-blank before continuing
+	halt
+	nop
+	
+	; disable LCD screen for now
+	ldh	[rLCDC],a
+	
+	; clear out shadow OAM and room for a few variables
+	ld	hl,_RAM
+	ld	bc,$A7
+	call	mem_Set
+	
+	; copy OAM DMA code to HRAM where we can easily access it later
+	ld	de,_HRAM
+	ld	hl,dmacode
+	ld	bc,dmaend-dmacode
+	call	mem_Copy
+	
+	; set bg palette and sprite palette 0
+	ld	a,%11100100
+	ld	[rBGP],a
+	ld	[rOBP0],a
+	
+	; load tiles and titlescreen map
+	ld	hl,TileLabel
+	call	load_Tiles
+	ld	hl,TitlescreenMapLabel
+	call	load_Map
+	
+	; set up sound registers
+	ld	a,%10000000
+	; Channel 1: Wave Pattern Duty = 50%
+	;            Sound Length = 0 (unused)
+	ldh	[$11],a
+	
+	; Channel 1: Volume = 8/15
+	;            Envelope Direction = Decrease (unused)
+	;            Number of Envelop Sweep = 0 (disable)
+	ldh	[$12],a
+	
+	ld	a,%01000000
+	; Channel 2: Wave Pattern Duty = 25%
+	;            Sound Length = 0 (unused)
+	ldh	[$16],a
+
+	; Channel 2: Volume = 4/15
+	;            Envelope Direction = Decrease (unused)
+	;            Number of Envelop Sweep = 0 (disable)
+	ldh	[$17],a
+	
+	; Channel 3: Volume = 100%
+	ldh	[$1C],a
+	
+	ld	a,%01110111
+	; Channels 1, 2 and 3 enabled on both outputs
+	ldh	[$25],a
+	
+	; Set Channel 3 wave pattern to a 50% square wave at 8/15 amplitude
+	; When played at 100% volume, sounds the same as Channel 1
+	cpl
+	ld	hl,$FF30
+	ld	[hli],a ; \
+	ld	[hli],a ; |
+	ld	[hli],a ; |
+	ld	[hli],a ; |-- First 16 samples of waveform = 0100
+	ld	[hli],a ; |
+	ld	[hli],a ; |
+	ld	[hli],a ; |
+	ld	[hli],a ; /
+	xor	a
+	ld	[hli],a ; \
+	ld	[hli],a ; |
+	ld	[hli],a ; |
+	ld	[hli],a ; |-- Last 16 samples of waveform = 0000
+	ld	[hli],a ; |
+	ld	[hli],a ; |
+	ld	[hli],a ; |
+	ld	[hli],a ; /
+	
+	; Channel 1: Sweep Time = 0 (disable)
+	;            Sweep Increase/Decrease = Addition (unused)
+	;            Number of sweep shift = 0 (unused)
+	ldh	[$10],a
+	
+	; point hl at location of music
+	ld	hl,MusicStart
+	
+	; clear pending interrupts
+	ldh	[$0F],a
+	
+	; turn interrupts and screen back on
+	ei
+	; 	   /------------ ............LCD Display Enable: On
+	; 	   |/----------- Window Tile Map Display Select: 9800-9BFF
+	; 	   ||/---------- .........Window Display Enable: Off
+	; 	   |||/--------- ..BG & Window Tile Data Select: 8000-8FFF
+	; 	   ||||/-------- ....BG Tile Map Display Select: 9800-9BFF
+	; 	   |||||/------- .............OBJ (Sprite) Size: 8x8
+	; 	   ||||||/------ ...OBJ (Sprite) Display Enable: On
+	; 	   |||||||/----- ....................BG Display: On
+	ld	a,%10010011
+	ld	[rLCDC],a
+	
+Main::
+	halt ; This is the loop where the code waits for a v-blank
+	nop
+	jr	Main
+
+VBLANK_CODE::
+	call	Get_Keys
+	ld	a,[CurMap] ; If the CurMap variable is 0, stay on title screen
+	or	a
+	jp	z,.titleScreen
+	; We're supposed to be in the actual game. Are we?
+	; (10, 0) is tile 0 on the titlescreen and non-zero in-game
+	ld	a,[_SCRN0+$0A+(SCRN_VY_B*0)]
+	or	a
+	jp	nz,.game ; Game map is already loaded, continue
+	; Set Channel 1 and 2 volume to 0, disable Channel 3
+	ldh	[$12],a
+	ldh	[$17],a
+	ldh	[$1A],a
+	; Turn off LCD screen temporarily
+	ld	[rLCDC],a
+	ld	hl,GameMapLabel
+	call	load_Map
+	
+	; load save
+	ld	hl,$A000
+	ld	a,$0A
+	ld	[0],a
+	; check save checksum
+	xor a
+	add	[hl] ; high byte of high score
+	inc	hl
+	add	[hl] ; low byte of high score
+	inc	hl
+	add	[hl] ; \
+	inc	hl   ; |
+	add	[hl] ; |
+	inc	hl   ; |-- tiles of decimal digits of high score
+	add	[hl] ; |
+	inc	hl   ; |
+	add	[hl] ;/
+	inc	hl
+	cp	[hl] ; checksum byte
+	jr	z,.saveExists
+	ld	a,$2C
+	ld	[hld],a
+	ld	a,$0B
+	ld	[hld],a
+	ld	[hld],a
+	ld	[hld],a
+	ld	[hld],a
+	xor a
+	ld	[hld],a
+	ld	[hl],a
+.saveExists
+	ld	hl,$A000
+	ld	a,[hli]
+	ld	[HighScoreHigh],a
+	ld	a,[hli]
+	ld	[HighScoreLow],a
+	ld	a,[hli]
+	push	af
+	ld	a,[hli]
+	push	af
+	ld	a,[hli]
+	push	af
+	ld	a,[hli]
+	ld	hl,$9810
+	ld	[hli],a
+	pop	af
+	ld	[hli],a
+	pop	af
+	ld	[hli],a
+	pop	af
+	ld	[hli],a
+	xor	a
+	ld	[0],a
+	
+	; Put the ball in its starting location
+	ld	a,$20
+	ld	[BallYAddr],a
+	ld	a,$54
+	ld	[BallXAddr],a
+	
+	; Set the ball's appearance
+	ld	a,$1C
+	ld	[BallTileNum],a
+	
+	; Set position and appearence of the three paddle sprites
+	ld	a,$90
+	ld	[PaddleLYAddr],a
+	ld	a,$4C
+	ld	[PaddleLXAddr],a
+	
+	ld	a,$1D
+	ld	[PaddleLTileNum],a
+	
+	ld	a,$90
+	ld	[PaddleMYAddr],a
+	ld	a,$54
+	ld	[PaddleMXAddr],a
+	
+	ld	a,$1E
+	ld	[PaddleMTileNum],a
+	
+	ld	a,$90
+	ld	[PaddleRYAddr],a
+	ld	a,$5C
+	ld	[PaddleRXAddr],a
+	
+	ld	a,$1F
+	ld	[PaddleRTileNum],a
+	
+	; Set all sprite flags to 0
+	xor	a
+	ld	[BallFlags],a
+	ld	[PaddleLFlags],a
+	ld	[PaddleMFlags],a
+	ld	[PaddleRFlags],a
+	
+	; Ball's initial vector: 2 right, 2 down per frame
+	ld	a,$02
+	ld	[BallXVector],a
+	ld	[BallYVector],a
+	
+	; Turn screen back on
+	ld	a,%10010011
+	ld	[rLCDC],a
+	jr	.game
+.titleScreen
+	; Only update music when C holds 0 (every third frame)
+	or	c
+	jr	nz,.doneMusic
+	ld	a,$03
+	ld	c,a
+	
+	; Song data was converted from midi externally and stored as raw bytes
+	; For each channel:
+	; - If next byte = $00: Mute channel. End.
+	; - If next byte = $FF: Hold current note/rest. End.
+	; - Otherwise: Next byte = low 8 byte of frequency. Continue.
+	;   Next byte = (%10000000 | high 3 bits of frequency). End.
+	ld	a,[hli]
+	or	a
+	jr	nz,.skipMuteOne
+	; $00
+	ldh	[$12],a
+	jr	.skipChannelOne
+.skipMuteOne
+	cp	$FF
+	; $FF
+	jr	z,.skipChannelOne
+	; Other
+	push	af
+	ld	a,%10000000
+	ldh	[$12],a
+	pop	af
+	ldh	[$13],a
+	ld	a,[hli]
+	ldh	[$14],a
+.skipChannelOne
+	ld	a,[hli]
+	or	a
+	jr	nz,.skipMuteTwo
+	; $00
+	ldh	[$17],a
+	jr	.skipChannelTwo
+.skipMuteTwo
+	cp	$FF
+	; FF
+	jr	z,.skipChannelTwo
+	; Other
+	push	af
+	ld	a,%01000000
+	ldh	[$17],a
+	pop	af
+	ldh	[$18],a
+	ld	a,[hli]
+	ldh	[$19],a
+.skipChannelTwo
+	ld	a,[hli]
+	or	a
+	jr	nz,.skipMuteThree
+	; $00
+	ldh	[$1A],a
+	jr	.skipChannelThree
+.skipMuteThree
+	cp	$FF
+	; $FF
+	jr	z,.skipChannelThree
+	; Other
+	push	af
+	ld	a,%10000000
+	ldh	[$1A],a
+	pop	af
+	ldh	[$1D],a
+	ld	a,[hli]
+	ldh	[$1E],a
+.skipChannelThree
+	; If hl points at the end of the song, point it at the beginning again
+	ld	a,h
+	cp	MusicEnd >> 8
+	jr	nz,.doneMusic
+	ld	a,l
+	cp	MusicEnd & $FF
+	jr	nz,.doneMusic
+	ld	hl,MusicStart
+.doneMusic
+	dec	c ; Music counter
+.skipMusic
+	ld	a,b
+	and	%00001001 ; A is nonzero iff start or a was pressed
+	ld	[CurMap],a ; Start the game if one of them was pressed
+	jp	nz,_HRAM
+.deleteSave
+	ld	a,b
+	and	%01000110
+	cp	%01000110 ; zero iff up+select+b
+	jp	nz,_HRAM
+	ld	hl,$A000
+	ld	a,$0A
+	ld	[0],a
+	inc	[hl] ; Modify any byte so checksome no longer matches
+	xor	a
+	ld	[0],a
+	rst	$00
+.game
+.playerLeft
+	bit	5,b
+	jr	z,.playerRight
+	ld	a,[PaddleLXAddr]
+	cp	$10
+	jr	z,.playerRight
+	sub	1
+	ld	[PaddleLXAddr],a
+	add	8
+	ld	[PaddleMXAddr],a
+	add	8
+	ld	[PaddleRXAddr],a
+.playerRight
+	bit	4,b
+	jr	z,.gameOver
+	ld	a,[PaddleLXAddr]
+	cp	$88
+	jr	z,.gameOver
+	add	1
+	ld	[PaddleLXAddr],a
+	add	8
+	ld	[PaddleMXAddr],a
+	add	8
+	ld	[PaddleRXAddr],a
+.gameOver
+	ld	a,[BallYAddr]
+	cp	$AF
+	jr	c,.ballHorizontal
+	call	fail_noise
+	; save high score
+	ld	hl,$9810
+	ld	a,[hli]
+	push	af
+	ld	a,[hli]
+	push	af
+	ld	a,[hli]
+	push	af
+	ld	a,[hli]
+	push	af
+	ld	a,$00
+	ld	[0],a
+	ld	hl,$A000
+	ld	[HighScoreHigh],a
+	ld	[hli],a
+	ld	a,[HighScoreLow]
+	ld	[hli],a
+	pop	af
+	ld	[hli],a
+	pop	af
+	ld	[hli],a
+	pop	af
+	ld	[hli],a
+	pop	af
+	ld	[hli],a
+	xor	a
+	ld	hl,$A000
+	add	[hl]
+	inc	hl
+	add	[hl]
+	inc	hl
+	add	[hl]
+	inc	hl
+	add	[hl]
+	inc	hl
+	add	[hl]
+	inc	hl
+	add	[hl]
+	inc	hl
+	ld	[hl],a
+	xor	a
+	ld	[0],a
+	ld	a,$54
+	ld	[BallXAddr],a
+	ld	a,$20
+	ld	[BallYAddr],a
+	xor	a
+	ld	[CurScoreHigh],a
+	ld	[CurScoreLow],a
+	ld	hl,$9806
+	ld	a,$0B
+	ld	[hli],a
+	ld	[hli],a
+	ld	[hli],a
+	ld	[hli],a
+.ballHorizontal
+	xor	a
+	ld	d,a
+	ld	a,[BallXVector]
+	ld	b,a
+	ld	a,[BallXAddr]
+	add	b
+	ld	[BallXAddr],a
+.rightWall
+	cp	$98
+	jr	z,.xFlip
+	jr	c,.leftWall
+	sub	$99
+	cpl
+	add	$98
+	ld	[BallXAddr],a
+	jr	.xFlip
+.leftWall
+	cp	$10
+	jr	z,.xFlip
+	jr	nc,.ballVertical
+	sub	$10
+	cpl
+	add	$11
+	ld	[BallXAddr],a
+.xFlip
+	inc	d
+	call	wall_noise
+	xor	a
+	sub	b
+	ld	[BallXVector],a
+.ballVertical
+	ld	a,[BallYVector]
+	ld	b,a
+	ld	a,[BallYAddr]
+	add	b
+	ld	[BallYAddr],a
+	cp	$20
+	jr	z,.yFlip
+	jr	nc,.paddleFlip
+	sub	$20
+	cpl
+	add	$21
+.yFlip
+	ld	a,d
+	or	a
+	jr	z,.endCornerCheck
+	ld	a,[BallXVector]
+	cp	$04
+	jp	c,.leftCorner
+.leftCorner
+	ld	a,$1
+	ld	[BallXVector],a
+	jr	.endCornerCheck
+.rightCorner
+	ld	a,$FF
+	ld	[BallXVector],a
+.endCornerCheck
+	call	wall_noise
+	xor	a
+	sub	b
+	ld	[BallYVector],a
+.paddleFlip
+	cp	$88
+	call	z,Get_Bounce
+	cp	$89
+	call	z,Get_Bounce
+	cp	$8A
+	call	z,Get_Bounce
+	cp	$8B
+	call	z,Get_Bounce
+	cp	$8C
+	call	z,Get_Bounce
+	cp	$8D
+	call	z,Get_Bounce
+	cp	$FE
+	jr	z,.incScore
+	cp	$FF
+	jp	nz,.end
+.incScore
+	call	paddle_noise
+.testHigh
+	ld	a,[CurScoreHigh]
+	ld	b,a
+	ld	a,[HighScoreHigh]
+	xor	b
+	ld	c,a
+	ld	a,[CurScoreLow]
+	ld	b,a
+	ld	a,[HighScoreLow]
+	xor	b
+	or	c
+	push	af
+	ld	hl,CurScoreLow
+	inc	[hl]
+	jr	nz,.updateHigh
+	ld	hl,CurScoreHigh
+	inc	[hl]
+	jr	nz,.updateHigh
+	dec	[hl]
+	ld	hl,CurScoreLow
+	dec	[hl]
+.updateHigh
+	pop	af
+	or	a
+	jr	nz,.incBoard
+	ld	a,[CurScoreHigh]
+	ld	[HighScoreHigh],a
+	ld	a,[CurScoreLow]
+	ld	[HighScoreLow],a
+.incBoard
+	ld	hl,$9809
+	call	Increment_Score
+	ld	a,[CurScoreHigh]
+	ld	c,a
+	ld	a,[HighScoreHigh]
+	xor	c
+	jr	nz,.end
+	ld	a,[CurScoreLow]
+	ld	c,a
+	ld	a,[HighScoreLow]
+	xor	c
+	jr	nz,.end
+	ld	hl,$9809
+	ld	a,[hld]
+	push	af
+	ld	a,[hld]
+	push	af
+	ld	a,[hld]
+	push	af
+	ld	a,[hld]
+	ld	hl,$9810
+	ld	[hli],a
+	pop	af
+	ld	[hli],a
+	pop	af
+	ld	[hli],a
+	pop	af
+	ld	[hli],a
+.end
+	jp	_HRAM
+
+load_Tiles::
+	ld	de,_VRAM
+	ld	bc,16*49
+	jp	mem_Copy
+
+load_Map::
+	ld	de,_SCRN0+0+(SCRN_VY_B*0)
+	ld	bc,32*18
+	jp	mem_Copy
+
+dmacode::
+	ld	a,_RAM/$100
+	ldh	[rDMA],a ; Start DMA
+	ld	a,$28 ; 160ns
+dma_wait::
+	dec	a
+	jr	nz,dma_wait
+	ret
+dmaend::
+
+Get_Keys::
+	ld	a,$20
+	ld	[$ff00],a
+	ld	a,[$ff00]
+	ld	a,[$ff00] ; wait a few cycles
+	cpl
+	and	$0f
+	swap	a
+	ld	b,a
+	ld	a,$10
+	ld	[$ff00],a
+	ld	a,[$ff00]
+	ld	a,[$ff00]
+	ld	a,[$ff00]
+	ld	a,[$ff00]
+	ld	a,[$ff00]
+	ld	a,[$ff00] ; wait a few more cycles
+	cpl
+	and	$0f
+	or	b
+	ld	b,a
+	ld	a,$30
+	ld	[$ff00],a ; reset joypad
+	ret
+
+Get_Bounce::
+	ld	a,[PaddleLXAddr]
+	ld	b,a
+	ld	a,[BallXAddr]
+	sub	b
+	add	$0A
+.first
+	sub	4
+	jr	nc,.second
+	ld	a,$FD
+	ld	[BallXVector],a
+	ld	a,$FE
+	ld	[BallYVector],a
+	ret
+.second
+	sub	5
+	jr	nc,.third
+	ld	a,$FE
+	ld	[BallXVector],a
+	ld	a,$FF
+	ld	[BallYVector],a
+	ret
+.third
+	sub	6
+	jr	nc,.fourth
+	ld	a,$FE
+	ld	[BallXVector],a
+	ld	a,$FE
+	ld	[BallYVector],a
+	ret
+.fourth
+	sub	3
+	jr	nc,.fifth
+	ld	a,$FF
+	ld	[BallXVector],a
+	ld	a,$FE
+	ld	[BallYVector],a
+	ret
+.fifth
+	sub	4
+	jr	nc,.sixth
+	ld	a,$01
+	ld	[BallXVector],a
+	ld	a,$FE
+	ld	[BallYVector],a
+	ret
+.sixth
+	sub	6
+	jr	nc,.seventh
+	ld	a,$02
+	ld	[BallXVector],a
+	ld	a,$FE
+	ld	[BallYVector],a
+	ret
+.seventh
+	sub	5
+	jr	nc,.eighth
+	ld	a,$02
+	ld	[BallXVector],a
+	ld	a,$FF
+	ld	[BallYVector],a
+	ret
+.eighth
+	sub	4
+	ret	nc
+	ld	a,$03
+	ld	[BallXVector],a
+	ld	a,$FE
+	ld	[BallYVector],a
+	ret
+
+Increment_Score::
+	ld	a,$0A
+	cp	[hl]
+	ret	z
+	ld	a,$14
+	cp	[hl]
+	jr	z,.carry
+	inc	[hl]
+	dec	l
+	ret
+.carry
+	ld	a,$0B
+	ld	[hld],a
+	jp	Increment_Score
+
+wall_noise::
+	ld	a,%10110100
+	ldh	[$16],a
+	ld	a,%11000011
+	ldh	[$17],a
+	ld	a,%01110010
+	ldh	[$18],a
+	ld	a,%11000110
+	ldh	[$19],a
+	ret
+
+paddle_noise::
+	ld	a,%10110100
+	ldh	[$16],a
+	ld	a,%11000011
+	ldh	[$17],a
+	ld	a,%11010110
+	ldh	[$18],a
+	ld	a,%11000110
+	ldh	[$19],a
+	ret
+
+fail_noise::
+	ld	a,%10010100
+	ldh	[$16],a
+	ld	a,%11000011
+	ldh	[$17],a
+	ld	a,%01100011
+	ldh	[$18],a
+	ld	a,%11000101
+	ldh	[$19],a
+	ret
+
+;*** End Of File ***
