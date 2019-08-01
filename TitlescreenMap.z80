@@ -18,7 +18,7 @@ TitlescreenMapLabelWidth  EQU 32
 TitlescreenMapLabelHeight EQU 18
 TitlescreenMapLabelBank   EQU 0
 
- SECTION "TitlescreenMap", HOME
+ SECTION "TitlescreenMap", ROM0
 
 TitlescreenMapLabel::
 DB $00,$00,$00,$00,$00,$00,$00,$00,$00,$00

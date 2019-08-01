@@ -10,7 +10,7 @@
 	IF      !DEF(MEMORY_ASM)
 MEMORY_ASM  SET  1
 
-	SECTION "Memory Code",HOME
+	SECTION "Memory Code",ROM0
 
 mem_Set::
 	inc	b
